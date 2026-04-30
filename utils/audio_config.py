@@ -1,4 +1,5 @@
 """Audio file configuration and discovery system."""
+import json
 import os
 import sys
 from pathlib import Path
@@ -66,24 +67,25 @@ def get_audio_config():
     - beat.wav = beat track
     - all others = vocal tracks
     """
+    audio_files = list_audio_files()
+    
     if "beat.wav" not in audio_files:
-        print("ERROR: 'beat.wav' not found in resources folder.")
-        print("Please rename your beat file to 'beat.wav'.")
+        print("Error: beat.wav not found in resources folder.")
+        print("Please rename your beat file to beat.wav.")
         return None
 
     beat_file = "beat.wav"
     vocal_files = [f for f in audio_files if f != beat_file]
 
     if not vocal_files:
-        print("ERROR: No vocal files found (only beat.wav present).")
+        print("Error: No vocal files found (only beat.wav present).")
         print("Need at least one vocal file in resources/")
         return None
 
-    print("✓ Auto Configuration")
+    print("Auto Configuration")
     print(f"  Beat: {beat_file}")
     print(f"  Vocals: {', '.join(vocal_files)}")
 
-    # Save config for next time
     save_config(beat_file, vocal_files)
 
     return {

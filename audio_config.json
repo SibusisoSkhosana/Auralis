@@ -1,6 +1,8 @@
 {
   "beat": "beat.wav",
   "vocals": [
+    "mix_a.wav",
+    "mix_b.wav",
     "prj 1_prj 1_2025-01-08 16-58-37_REC.wav",
     "prj 1_prj 1_2025-01-08 17-19-13_REC.wav",
     "prj 1_prj 1_2025-01-08 17-32-15_REC.wav",

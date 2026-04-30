@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 """Training script for the mix comparison model."""
 
 import sys

@@ -72,6 +72,13 @@ def train(log_file="data/mix_log.jsonl", comparison_file="data/mix_comparisons.j
     
     if len(records) == 0:
         print("Error: No training data found.")
+        print(f"  Checked for: {log_file}")
+        print(f"  Checked for: {comparison_file}")
+        print("\nTo generate training data:")
+        print("  1. Run: python app.py")
+        print("  2. Listen to mix_a.wav and mix_b.wav")
+        print("  3. Run: python rate_mix.py a  (or b, or tie)")
+        print("  4. Repeat 2-3 times, then run this again")
         return
     
     X = np.array([r["features"] for r in records])
