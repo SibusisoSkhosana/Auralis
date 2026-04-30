@@ -1,2 +1,13 @@
 # Auralis
-AI-assisted audio mixing engine that processes stems, analyzes audio characteristics, and learns mixing preferences over time.
+
+AI-powered audio mixing engine.
+
+## Features
+- Multi-track processing
+- Automatic stem classification
+- Learning-based mixing (in progress)
+
+## Setup
+1. Add audio files to /resources (not tracked)
+2. Run:
+   python app.py
