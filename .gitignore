@@ -1,0 +1,15 @@
+# Ignore audio files
+resources/*.wav
+resources/*.mp3
+
+# Python
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+venv/
