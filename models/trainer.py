@@ -7,9 +7,16 @@ import joblib
 import os
 
 def train(log_file="data/mix_log.jsonl", comparison_file="data/mix_comparisons.jsonl"):
-    """Train the model on recorded mix comparisons and ratings."""
+    """
+    Train the model on recorded mix comparisons and ratings.
+    
+    IMPORTANT: From MIXING_GUIDELINES.md
+    - Only trains on VALID mixes (preference != "skip")
+    - Skips entries marked as "skip" to prevent negative reinforcement
+    """
     
     records = []
+    skipped_count = 0
     
     if os.path.exists(log_file):
         try:
@@ -23,6 +30,13 @@ def train(log_file="data/mix_log.jsonl", comparison_file="data/mix_comparisons.j
             
             for comp in comparisons:
                 preference = comp.get("preference", "tie")
+                
+                # SKIP entries marked as "skip" (from MIXING_GUIDELINES.md rule #6)
+                if preference == "skip":
+                    skipped_count += 1
+                    print(f"  Skipping: Bad mix comparison (prevents negative learning)")
+                    continue
+                
                 features = comp["features"]
                 stem_identities = comp.get("stem_identities", {})
                 
@@ -74,12 +88,16 @@ def train(log_file="data/mix_log.jsonl", comparison_file="data/mix_comparisons.j
         print("Error: No training data found.")
         print(f"  Checked for: {log_file}")
         print(f"  Checked for: {comparison_file}")
+        print(f"  (Skipped {skipped_count} bad comparisons)")
         print("\nTo generate training data:")
         print("  1. Run: python app.py")
         print("  2. Listen to mix_a.wav and mix_b.wav")
-        print("  3. Run: python rate_mix.py a  (or b, or tie)")
+        print("  3. Run: python rate_mix.py a  (or b, or tie, or skip)")
         print("  4. Repeat 2-3 times, then run this again")
         return
+    
+    if skipped_count > 0:
+        print(f"\n[INFO] Skipped {skipped_count} bad comparisons (preventing negative reinforcement)")
     
     X = np.array([r["features"] for r in records])
     ratings = np.array([r["rating"] for r in records])

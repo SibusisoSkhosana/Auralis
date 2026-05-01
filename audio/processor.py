@@ -1,22 +1,88 @@
 import numpy as np
 from scipy.signal import butter, sosfilt
 
+# === SAFETY PARAMETERS (from MIXING_GUIDELINES.md) ===
+MAX_PEAK_LINEAR = 0.95  # Absolute max before limiter (safety margin)
+LIMITER_THRESHOLD = 0.85  # Limiter engages at this level
+MIN_HEADROOM_DB = 1.0  # Minimum headroom after normalization
+
 def highpass_filter(y, sr, cutoff=200):
+    """Apply high-pass filter to remove mud frequencies."""
     nyquist = 0.5 * sr
     sos = butter(2, cutoff / nyquist, btype='high', output='sos')
     return sosfilt(sos, y)
 
-def normalize_audio(y, target_db=-20):
+def normalize_audio(y, target_db=-20, headroom_db=1.0):
+    """
+    Normalize audio to target level with safety headroom.
+    
+    IMPORTANT: This enforces safe levels to prevent over-normalization.
+    After normalization, audio should have at least headroom_db of space
+    before clipping.
+    """
     y = np.asarray(y)
+    
+    # Enforce safe target range (from MIXING_GUIDELINES.md)
+    target_db = np.clip(target_db, -30, -6)
+    
     rms = np.sqrt(np.mean(y**2, axis=-1, keepdims=True))
     current_db = 20 * np.log10(rms + 1e-6)
     gain = target_db - current_db
     factor = 10 ** (gain / 20)
-    return y * factor
+    normalized = y * factor
+    
+    # Check peak after normalization
+    peak_linear = np.max(np.abs(normalized))
+    peak_db = 20 * np.log10(peak_linear + 1e-6) if peak_linear > 0 else -np.inf
+    
+    # If peak is too close to clipping, scale down further
+    if peak_db > (0 - headroom_db):
+        reduction_db = peak_db - (0 - headroom_db) + 0.5
+        reduction_factor = 10 ** (-reduction_db / 20)
+        normalized *= reduction_factor
+    
+    return normalized
 
-def limiter(y, threshold=0.9):
+def limiter(y, threshold=0.85, makeup_gain_db=0):
+    """
+    Hard limiter using clipping to prevent peaks exceeding threshold.
+    
+    This is a SAFETY limiter - it prevents clipping, not a creative effect.
+    Operates in two stages:
+    1. Soft knee (tanh) for smooth onset
+    2. Hard clip for absolute safety
+    
+    Args:
+        y: Input audio
+        threshold: Peak threshold (default 0.85, safe headroom to 1.0)
+        makeup_gain_db: Optional makeup gain (use cautiously)
+    
+    Returns:
+        Limited audio
+    """
     y = np.asarray(y)
-    return np.tanh(y / threshold) * threshold
+    
+    # Hard safety clip at max_peak_linear
+    y_clipped = np.clip(y, -MAX_PEAK_LINEAR, MAX_PEAK_LINEAR)
+    
+    # Apply soft knee limiter for smooth limiting
+    # Using tanh for smooth saturation before hard clip
+    y_limited = np.where(
+        np.abs(y) > threshold,
+        np.sign(y) * threshold * np.tanh(np.abs(y) / threshold),
+        y
+    )
+    
+    # Final hard clip as absolute safety
+    y_limited = np.clip(y_limited, -MAX_PEAK_LINEAR, MAX_PEAK_LINEAR)
+    
+    # Optional makeup gain (use sparingly)
+    if makeup_gain_db != 0:
+        makeup_factor = 10 ** (makeup_gain_db / 20)
+        y_limited *= makeup_factor
+        y_limited = np.clip(y_limited, -MAX_PEAK_LINEAR, MAX_PEAK_LINEAR)
+    
+    return y_limited
 
 def stereo_widen(y, width=0.15):
     """Apply stereo widening using Mid/Side technique."""
