@@ -165,6 +165,38 @@ else:
     params_a = vary_params(DEFAULT_PARAMS.copy(), seed=42)
     params_b = vary_params(DEFAULT_PARAMS.copy(), seed=43)
 
+def combine_vocals(processed_vocals, beat_len, sr):
+    """Combine vocal material across the full beat timeline."""
+    if not processed_vocals:
+        return None
+
+    vocal_items = list(processed_vocals.items())
+    lengths = [vocals.shape[1] for _, vocals in vocal_items]
+    use_sequential_layout = (
+        len(vocal_items) > 1
+        and float(np.median(lengths)) < beat_len * 0.75
+    )
+
+    combined = np.zeros((2, beat_len), dtype=np.float32)
+
+    if use_sequential_layout:
+        cursor = 0
+        gap_samples = int(0.25 * sr)
+
+        for _, vocals in vocal_items:
+            if cursor >= beat_len:
+                break
+
+            clip_len = min(vocals.shape[1], beat_len - cursor)
+            combined[:, cursor:cursor + clip_len] += vocals[:, :clip_len]
+            cursor += clip_len + gap_samples
+    else:
+        for _, vocals in vocal_items:
+            clip_len = min(vocals.shape[1], beat_len)
+            combined[:, :clip_len] += vocals[:, :clip_len]
+
+    return combined
+
 def process_mix(beat, vocals_dict, params, sr, mix_name):
     """
     Process audio stems with given parameters and return mixed audio.
@@ -214,14 +246,8 @@ def process_mix(beat, vocals_dict, params, sr, mix_name):
         
         processed_vocals[section_name] = vocals
     
-    # ========== STEP 3: Combine all vocals ==========
-    combined_vocals = None
-    for section, vocals in processed_vocals.items():
-        if combined_vocals is None:
-            combined_vocals = vocals.copy()
-        else:
-            min_len = min(combined_vocals.shape[1], vocals.shape[1])
-            combined_vocals[:, :min_len] += vocals[:, :min_len]
+    # ========== STEP 3: Combine all vocals across the full beat timeline ==========
+    combined_vocals = combine_vocals(processed_vocals, beat_proc.shape[1], sr)
     
     # ========== STEP 4: Gain balance with headroom protection ==========
     if combined_vocals is not None:
@@ -242,9 +268,7 @@ def process_mix(beat, vocals_dict, params, sr, mix_name):
                 # Beat is too loud - scale vocals up
                 combined_vocals *= gain_balance
         
-        # Combine at equal lengths
-        min_len = min(combined_vocals.shape[1], beat_proc.shape[1])
-        mix = combined_vocals[:, :min_len] + beat_proc[:, :min_len]
+        mix = combined_vocals + beat_proc
         
         # ========== STEP 5: Apply limiter LAST ==========
         mix = limiter(mix, threshold=0.85)

@@ -15,12 +15,21 @@ from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 import traceback
+import librosa
+import numpy as np
+from urllib.parse import quote
 
 # Add parent directory to path for Auralis imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from models.mix_generator import MixGenerator, to_json_compatible
 from models.data_collector import log_mix_comparison
+from audio.alignment import (
+    calculate_alignment,
+    load_alignment_offsets,
+    save_alignment_offsets,
+    samples_to_ms,
+)
 from utils.file_io import save_audio
 from utils.audio_config import get_audio_config, load_config, save_config
 
@@ -89,6 +98,9 @@ def save_uploaded_project(uploaded_files):
     """Persist uploaded audio files as the active resources project."""
     saved_files = []
     clear_resource_audio()
+    alignment_path = Path('data/alignment_offsets.json')
+    if alignment_path.exists():
+        alignment_path.unlink()
 
     for uploaded_file in uploaded_files:
         if not uploaded_file.filename or not allowed_file(uploaded_file.filename):
@@ -112,6 +124,38 @@ def save_uploaded_project(uploaded_files):
 
     save_config(beat_file, vocal_files)
     return {'beat': beat_file, 'vocals': vocal_files}
+
+def resource_url(filename):
+    return f"/api/source-audio/{quote(filename)}"
+
+def get_project_payload():
+    """Return active project metadata for the React UI."""
+    config = load_config()
+    if not config:
+        return {
+            'configured': False,
+            'beat': None,
+            'vocals': [],
+            'offsets': {}
+        }
+
+    offsets = load_alignment_offsets()
+    return {
+        'configured': True,
+        'beat': {
+            'filename': config['beat'],
+            'url': resource_url(config['beat'])
+        },
+        'vocals': [
+            {
+                'filename': filename,
+                'url': resource_url(filename),
+                'offsetMs': offsets.get(filename, 0)
+            }
+            for filename in config['vocals']
+        ],
+        'offsets': offsets
+    }
 
 def get_training_stats():
     """Get training data statistics."""
@@ -151,6 +195,11 @@ def api_index():
         'endpoints': {
             'health': '/api/health',
             'stats': '/api/stats',
+            'project': '/api/project',
+            'upload_project': 'POST /api/project/upload',
+            'source_audio': '/api/source-audio/<filename>',
+            'sync_alignment': 'POST /api/alignment/sync',
+            'save_alignment': 'POST /api/alignment',
             'generate_mixes': 'POST /api/generate-mixes',
             'submit_feedback': 'POST /api/submit-feedback',
             'clear_project': 'POST /api/project/clear'
@@ -175,6 +224,131 @@ def get_stats():
         print(f"Error fetching stats: {e}")
         return jsonify({'total': 0, 'valid': 0, 'skipped': 0})
 
+@app.route('/api/project', methods=['GET'])
+def get_project():
+    """Get active project files and alignment offsets."""
+    try:
+        return jsonify(get_project_payload())
+    except Exception as e:
+        print(f"Error fetching project: {e}")
+        return jsonify({'error': 'Failed to fetch project'}), 500
+
+@app.route('/api/project/upload', methods=['POST'])
+def upload_project():
+    """Upload files and make them the active alignment/mixing project."""
+    global mixer
+    try:
+        uploaded_files = request.files.getlist('files')
+        if not uploaded_files:
+            return jsonify({'error': 'No audio files uploaded'}), 400
+
+        active_config = save_uploaded_project(uploaded_files)
+        mixer = MixGenerator(active_config)
+        return jsonify(get_project_payload())
+    except Exception as e:
+        print(f"Error uploading project: {e}")
+        traceback.print_exc()
+        return jsonify({'error': f'Failed to upload project: {str(e)}'}), 500
+
+@app.route('/api/source-audio/<path:filename>', methods=['GET'])
+def serve_source_audio(filename):
+    """Serve active project source audio for waveform rendering."""
+    try:
+        config = load_config()
+        if not config:
+            return jsonify({'error': 'No active project'}), 404
+
+        allowed = {config['beat'], *config['vocals']}
+        safe_filename = os.path.basename(filename)
+        if safe_filename not in allowed:
+            return jsonify({'error': 'Invalid source audio file'}), 404
+
+        filepath = Path('resources') / safe_filename
+        if not filepath.exists():
+            return jsonify({'error': 'Audio file not found'}), 404
+
+        return send_file(filepath)
+    except Exception as e:
+        print(f"Error serving source audio: {e}")
+        return jsonify({'error': 'Failed to serve source audio'}), 500
+
+@app.route('/api/alignment/sync', methods=['POST'])
+def sync_alignment():
+    """Calculate suggested alignment offsets for active vocal stems."""
+    try:
+        config = load_config()
+        if not config:
+            return jsonify({'error': 'No active project'}), 400
+
+        beat_path = Path('resources') / config['beat']
+        beat, sr = librosa.load(beat_path, sr=44100, mono=False)
+
+        vocal_lengths = []
+        loaded_vocals = []
+        for filename in config['vocals']:
+            vocal_path = Path('resources') / filename
+            vocal, _ = librosa.load(vocal_path, sr=sr, mono=False)
+            loaded_vocals.append((filename, vocal))
+            vocal_lengths.append(vocal.shape[-1] if np.asarray(vocal).ndim > 1 else len(vocal))
+
+        beat_len = beat.shape[-1] if np.asarray(beat).ndim > 1 else len(beat)
+        use_sequential_layout = (
+            len(vocal_lengths) > 1
+            and float(np.median(vocal_lengths)) < beat_len * 0.75
+        )
+
+        offsets = {}
+        cursor = 0
+        gap_samples = int(0.25 * sr)
+        for filename, vocal in loaded_vocals:
+            expected_start = cursor if use_sequential_layout else 0
+            best_start = calculate_alignment(beat, vocal, sr, expected_offset=expected_start)
+            offset_ms = samples_to_ms(best_start - expected_start, sr)
+            offsets[filename] = max(-2000, min(2000, round(offset_ms, 1)))
+
+            vocal_len = vocal.shape[-1] if np.asarray(vocal).ndim > 1 else len(vocal)
+            cursor += vocal_len + gap_samples
+
+        return jsonify({
+            'offsets': offsets,
+            'layout': 'sequential' if use_sequential_layout else 'layered'
+        })
+    except Exception as e:
+        print(f"Error syncing alignment: {e}")
+        traceback.print_exc()
+        return jsonify({'error': f'Failed to sync alignment: {str(e)}'}), 500
+
+@app.route('/api/alignment', methods=['POST'])
+def save_alignment():
+    """Persist user alignment offsets."""
+    try:
+        data = request.get_json() or {}
+        offsets = data.get('offsets', {})
+        config = load_config()
+        if not config:
+            return jsonify({'error': 'No active project'}), 400
+
+        allowed = set(config['vocals'])
+        clean_offsets = {
+            filename: max(-2000, min(2000, float(offset_ms)))
+            for filename, offset_ms in offsets.items()
+            if filename in allowed
+        }
+        saved = save_alignment_offsets(clean_offsets)
+
+        global mixer
+        if config:
+            mixer = MixGenerator(config)
+
+        return jsonify({
+            'success': True,
+            'offsets': saved
+        })
+    except Exception as e:
+        print(f"Error saving alignment: {e}")
+        traceback.print_exc()
+        return jsonify({'error': f'Failed to save alignment: {str(e)}'}), 500
+
 @app.route('/api/generate-mixes', methods=['POST'])
 def generate_mixes():
     """Generate comparison mixes from uploaded or configured audio stems.
@@ -190,12 +364,7 @@ def generate_mixes():
     """
     global mixer
     try:
-        uploaded_files = request.files.getlist('files')
         active_config = None
-
-        if uploaded_files:
-            active_config = save_uploaded_project(uploaded_files)
-            mixer = MixGenerator(active_config)
 
         # Check if mixer is initialized
         if mixer is None:
@@ -261,6 +430,9 @@ def clear_project():
         config_path = Path('audio_config.json')
         if config_path.exists():
             config_path.unlink()
+        alignment_path = Path('data/alignment_offsets.json')
+        if alignment_path.exists():
+            alignment_path.unlink()
         mixer = None
         return jsonify({
             'success': True,
@@ -352,7 +524,7 @@ def submit_feedback():
 def file_too_large(e):
     """Handle file too large error."""
     return jsonify({
-        'error': 'File too large. Maximum size is 100MB.'
+        'error': 'File too large. Maximum upload size is 2GB.'
     }), 413
 
 @app.errorhandler(404)

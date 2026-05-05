@@ -17,6 +17,18 @@ function resolveAudioUrl(url) {
   return new URL(url, apiOrigin).href
 }
 
+function resolveProjectAudio(project) {
+  if (!project?.configured) return project
+  return {
+    ...project,
+    beat: project.beat ? { ...project.beat, url: resolveAudioUrl(project.beat.url) } : null,
+    vocals: (project.vocals || []).map((vocal) => ({
+      ...vocal,
+      url: resolveAudioUrl(vocal.url),
+    })),
+  }
+}
+
 export const apiClient = {
   async generateMixes(payload) {
     try {
@@ -46,6 +58,42 @@ export const apiClient = {
       return response.data
     } catch (error) {
       throw new Error(messageFromError(error, 'Failed to clear active project.'))
+    }
+  },
+
+  async uploadProject(formData) {
+    try {
+      const response = await client.post('/project/upload', formData)
+      return resolveProjectAudio(response.data)
+    } catch (error) {
+      throw new Error(messageFromError(error, 'Failed to upload active project.'))
+    }
+  },
+
+  async getProject() {
+    try {
+      const response = await client.get('/project')
+      return resolveProjectAudio(response.data)
+    } catch (error) {
+      throw new Error(messageFromError(error, 'Failed to load active project.'))
+    }
+  },
+
+  async syncAlignment() {
+    try {
+      const response = await client.post('/alignment/sync')
+      return response.data
+    } catch (error) {
+      throw new Error(messageFromError(error, 'Failed to sync alignment.'))
+    }
+  },
+
+  async saveAlignment(offsets) {
+    try {
+      const response = await client.post('/alignment', { offsets })
+      return response.data
+    } catch (error) {
+      throw new Error(messageFromError(error, 'Failed to save alignment.'))
     }
   },
 

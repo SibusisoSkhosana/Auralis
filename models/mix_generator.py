@@ -18,6 +18,7 @@ from audio.processor import (
     to_channels_first
 )
 from audio.validator import MixValidator
+from audio.alignment import load_alignment_offsets, ms_to_samples
 from utils.file_io import save_audio
 from utils.audio_config import get_audio_config
 
@@ -57,6 +58,7 @@ class MixGenerator:
         self.beat_file = config["beat"]
         self.vocal_files = config["vocals"]
         self.sr = TARGET_SR
+        self.alignment_offsets = load_alignment_offsets()
         
         # Load beat
         beat_path = f"resources/{self.beat_file}"
@@ -68,6 +70,7 @@ class MixGenerator:
         
         # Load vocals
         self.vocals_dict = {}
+        self.section_files = {}
         for vocal_file in self.vocal_files:
             vocal_path = f"resources/{vocal_file}"
             section_name = Path(vocal_file).stem
@@ -75,6 +78,7 @@ class MixGenerator:
             if os.path.exists(vocal_path):
                 vocals, _ = librosa.load(vocal_path, sr=self.sr, mono=False)
                 self.vocals_dict[section_name] = to_channels_first(vocals)
+                self.section_files[section_name] = vocal_file
         
         # Load model if available
         self.model = None
@@ -95,6 +99,57 @@ class MixGenerator:
             self.default_params[f"{section_name}_vocal_target_db"] = -20
             self.default_params[f"{section_name}_highpass_cutoff"] = 200
             self.default_params[f"{section_name}_stereo_width"] = 0.03
+
+    def _combine_vocals(self, processed_vocals, beat_len):
+        """Combine vocal material without truncating the beat.
+
+        Full-length stems are layered from the start. Short clips are placed
+        sequentially, which matches exported takes/phrases from the UI workflow.
+        """
+        if not processed_vocals:
+            return None
+
+        vocal_items = list(processed_vocals.items())
+        lengths = [vocals.shape[1] for _, vocals in vocal_items]
+        use_sequential_layout = (
+            len(vocal_items) > 1
+            and float(np.median(lengths)) < beat_len * 0.75
+        )
+
+        combined = np.zeros((2, beat_len), dtype=np.float32)
+
+        if use_sequential_layout:
+            cursor = 0
+            gap_samples = int(0.25 * self.sr)
+
+            for section_name, vocals in vocal_items:
+                if cursor >= beat_len:
+                    break
+
+                filename = self.section_files.get(section_name, f"{section_name}.wav")
+                offset_samples = ms_to_samples(self.alignment_offsets.get(filename, 0), self.sr)
+                start = max(0, cursor + offset_samples)
+                source_start = max(0, -(cursor + offset_samples))
+                if start >= beat_len or source_start >= vocals.shape[1]:
+                    cursor += vocals.shape[1] + gap_samples
+                    continue
+
+                clip_len = min(vocals.shape[1] - source_start, beat_len - start)
+                combined[:, start:start + clip_len] += vocals[:, source_start:source_start + clip_len]
+                cursor += vocals.shape[1] + gap_samples
+        else:
+            for section_name, vocals in vocal_items:
+                filename = self.section_files.get(section_name, f"{section_name}.wav")
+                offset_samples = ms_to_samples(self.alignment_offsets.get(filename, 0), self.sr)
+                start = max(0, offset_samples)
+                source_start = max(0, -offset_samples)
+                if start >= beat_len or source_start >= vocals.shape[1]:
+                    continue
+
+                clip_len = min(vocals.shape[1] - source_start, beat_len - start)
+                combined[:, start:start + clip_len] += vocals[:, source_start:source_start + clip_len]
+
+        return combined
     
     def _load_model(self):
         """Load pre-trained model if available."""
@@ -238,14 +293,8 @@ class MixGenerator:
             
             processed_vocals[section_name] = vocals
         
-        # STEP 3: Combine all vocals
-        combined_vocals = None
-        for section, vocals in processed_vocals.items():
-            if combined_vocals is None:
-                combined_vocals = vocals.copy()
-            else:
-                min_len = min(combined_vocals.shape[1], vocals.shape[1])
-                combined_vocals[:, :min_len] += vocals[:, :min_len]
+        # STEP 3: Combine all vocals across the full beat timeline
+        combined_vocals = self._combine_vocals(processed_vocals, beat_proc.shape[1])
         
         # STEP 4: Gain balance with headroom protection
         if combined_vocals is not None:
@@ -261,8 +310,7 @@ class MixGenerator:
                 elif beat_rms > vocals_rms and gain_balance < 1.0:
                     combined_vocals *= gain_balance
             
-            min_len = min(combined_vocals.shape[1], beat_proc.shape[1])
-            mix = combined_vocals[:, :min_len] + beat_proc[:, :min_len]
+            mix = combined_vocals + beat_proc
             
             # STEP 5: Apply limiter LAST
             mix = limiter(mix, threshold=0.85)

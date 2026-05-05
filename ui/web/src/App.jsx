@@ -3,6 +3,7 @@ import Sidebar from './components/Sidebar'
 import MixComparison from './components/MixComparison'
 import ControlPanel from './components/ControlPanel'
 import StatusBar from './components/StatusBar'
+import AlignmentView from './components/AlignmentView'
 import { apiClient } from './api/client'
 
 const initialStats = { total: 0, valid: 0, skipped: 0 }
@@ -13,10 +14,15 @@ export default function App() {
   const [stats, setStats] = useState(initialStats)
   const [isGenerating, setIsGenerating] = useState(false)
   const [submittingChoice, setSubmittingChoice] = useState(null)
+  const [activeTab, setActiveTab] = useState('training')
+  const [project, setProject] = useState(null)
+  const [isProjectLoading, setIsProjectLoading] = useState(false)
+  const [isSyncing, setIsSyncing] = useState(false)
+  const [isSavingAlignment, setIsSavingAlignment] = useState(false)
   const [error, setError] = useState(null)
   const [notice, setNotice] = useState(null)
 
-  const isBusy = isGenerating || Boolean(submittingChoice)
+  const isBusy = isGenerating || Boolean(submittingChoice) || isProjectLoading || isSyncing || isSavingAlignment
   const canGenerate = files.length > 0 && !isBusy
   const canSubmit = Boolean(currentMix) && !isBusy
 
@@ -34,9 +40,42 @@ export default function App() {
     })
   }, [])
 
+  const loadProject = useCallback(async () => {
+    setIsProjectLoading(true)
+    try {
+      const data = await apiClient.getProject()
+      setProject(data)
+    } catch (err) {
+      setError(err.message || 'Failed to load active project.')
+    } finally {
+      setIsProjectLoading(false)
+    }
+  }, [])
+
   useEffect(() => {
     loadStats()
-  }, [loadStats])
+    loadProject()
+  }, [loadStats, loadProject])
+
+  const uploadActiveProject = useCallback(async (projectFiles) => {
+    if (projectFiles.length < 2) return
+
+    setIsProjectLoading(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const formData = new FormData()
+      projectFiles.forEach((file) => formData.append('files', file))
+      const uploadedProject = await apiClient.uploadProject(formData)
+      setProject(uploadedProject)
+      setCurrentMix(null)
+      setNotice('Project loaded. Open Alignment to sync vocals before generating mixes.')
+    } catch (err) {
+      setError(err.message || 'Failed to upload active project.')
+    } finally {
+      setIsProjectLoading(false)
+    }
+  }, [])
 
   const handleFileUpload = useCallback((incomingFiles) => {
     const audioFiles = incomingFiles.filter((file) => file.type.startsWith('audio/') || /\.(wav|mp3|flac|ogg)$/i.test(file.name))
@@ -45,18 +84,18 @@ export default function App() {
       return
     }
 
-    setFiles((existing) => {
-      const seen = new Set(existing.map((file) => `${file.name}:${file.size}:${file.lastModified}`))
-      const next = [...existing]
-      audioFiles.forEach((file) => {
-        const key = `${file.name}:${file.size}:${file.lastModified}`
-        if (!seen.has(key)) next.push(file)
-      })
-      return next
+    const seen = new Set(files.map((file) => `${file.name}:${file.size}:${file.lastModified}`))
+    const nextFiles = [...files]
+    audioFiles.forEach((file) => {
+      const key = `${file.name}:${file.size}:${file.lastModified}`
+      if (!seen.has(key)) nextFiles.push(file)
     })
+
+    setFiles(nextFiles)
+    uploadActiveProject(nextFiles)
     setNotice(null)
     setError(null)
-  }, [])
+  }, [files, uploadActiveProject])
 
   const handleFileRemove = useCallback((index) => {
     setFiles((existing) => existing.filter((_, currentIndex) => currentIndex !== index))
@@ -71,6 +110,7 @@ export default function App() {
       await apiClient.clearProject()
       setFiles([])
       setCurrentMix(null)
+      await loadProject()
       setNotice('Active project cleared. Upload the next project stems.')
     } catch (err) {
       setError(err.message || 'Failed to clear active project.')
@@ -86,22 +126,51 @@ export default function App() {
     setNotice(null)
 
     try {
-      const formData = new FormData()
-      files.forEach((file) => formData.append('files', file))
-
-      const mixData = await apiClient.generateMixes(formData)
+      const mixData = await apiClient.generateMixes({})
       setCurrentMix({
         ...mixData,
         generatedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         sourceFileCount: files.length,
       })
+      await loadProject()
       setNotice('Mixes generated. Compare A and B, then submit a preference.')
     } catch (err) {
       setError(err.message || 'Failed to generate mixes.')
     } finally {
       setIsGenerating(false)
     }
-  }, [canGenerate, files])
+  }, [canGenerate, files, loadProject])
+
+  const handleSyncAlignment = useCallback(async () => {
+    setIsSyncing(true)
+    setError(null)
+    setNotice(null)
+    try {
+      const result = await apiClient.syncAlignment()
+      setNotice(`Alignment synced (${result.layout || 'project'} layout). Review and save when ready.`)
+      return result
+    } catch (err) {
+      setError(err.message || 'Failed to sync alignment.')
+      return null
+    } finally {
+      setIsSyncing(false)
+    }
+  }, [])
+
+  const handleSaveAlignment = useCallback(async (offsets) => {
+    setIsSavingAlignment(true)
+    setError(null)
+    setNotice(null)
+    try {
+      await apiClient.saveAlignment(offsets)
+      await loadProject()
+      setNotice('Alignment saved. New mixes will use these offsets.')
+    } catch (err) {
+      setError(err.message || 'Failed to save alignment.')
+    } finally {
+      setIsSavingAlignment(false)
+    }
+  }, [loadProject])
 
   const handleSubmitFeedback = useCallback(async (choice) => {
     if (!canSubmit || !currentMix) return
@@ -142,8 +211,21 @@ export default function App() {
             <p className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">Training Console</p>
           </div>
           <nav className="hidden items-center gap-1 text-sm text-zinc-400 sm:flex">
-            <button className="rounded-md bg-zinc-800 px-3 py-1.5 text-zinc-100">Training</button>
-            <button className="rounded-md px-3 py-1.5 hover:bg-zinc-900 hover:text-zinc-200">History</button>
+            <button
+              className={`rounded-md px-3 py-1.5 ${activeTab === 'training' ? 'bg-zinc-800 text-zinc-100' : 'hover:bg-zinc-900 hover:text-zinc-200'}`}
+              onClick={() => setActiveTab('training')}
+            >
+              Training
+            </button>
+            <button
+              className={`rounded-md px-3 py-1.5 ${activeTab === 'alignment' ? 'bg-zinc-800 text-zinc-100' : 'hover:bg-zinc-900 hover:text-zinc-200'}`}
+              onClick={() => {
+                setActiveTab('alignment')
+                loadProject()
+              }}
+            >
+              Alignment
+            </button>
           </nav>
         </div>
         <div className="flex items-center gap-2 text-xs text-zinc-500">
@@ -161,7 +243,7 @@ export default function App() {
           onClearFiles={handleClearFiles}
           onGenerateMixes={handleGenerateMixes}
           canGenerate={canGenerate}
-          loading={isGenerating}
+          loading={isGenerating || isProjectLoading}
           stats={stats}
         />
 
@@ -188,14 +270,28 @@ export default function App() {
           )}
 
           <section className="min-h-0 flex-1 overflow-hidden p-5">
-            <MixComparison mix={currentMix} isGenerating={isGenerating} />
+            {activeTab === 'alignment' ? (
+              <AlignmentView
+                project={project}
+                loading={isProjectLoading}
+                syncing={isSyncing}
+                saving={isSavingAlignment}
+                onRefresh={loadProject}
+                onSync={handleSyncAlignment}
+                onSave={handleSaveAlignment}
+              />
+            ) : (
+              <MixComparison mix={currentMix} isGenerating={isGenerating} />
+            )}
           </section>
 
-          <ControlPanel
-            disabled={!canSubmit}
-            submittingChoice={submittingChoice}
-            onFeedback={handleSubmitFeedback}
-          />
+          {activeTab === 'training' && (
+            <ControlPanel
+              disabled={!canSubmit}
+              submittingChoice={submittingChoice}
+              onFeedback={handleSubmitFeedback}
+            />
+          )}
 
           <StatusBar
             stats={stats}
