@@ -13,3 +13,8 @@ Thumbs.db
 # Env
 .env
 venv/
+
+# React UI
+ui/web/node_modules/
+ui/web/dist/
+ui/web/*.log
