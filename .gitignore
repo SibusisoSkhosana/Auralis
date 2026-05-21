@@ -23,3 +23,5 @@ ui/web/*.log
 # Runtime / deployment artifacts
 *.db
 uploads/
+
+RENDER_SETUP.md

@@ -497,9 +497,13 @@ def get_stats():
 def get_project():
     """Get active project files and alignment offsets."""
     try:
-        return jsonify(get_project_payload())
+        user_id = get_jwt_identity()
+        payload = get_project_payload()
+        return jsonify(payload)
     except Exception as e:
-        print(f"Error fetching project: {e}")
+        print(f"Error fetching project: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': 'Failed to fetch project'}), 500
 
 @app.route('/api/source-audio/<path:filename>', methods=['GET'])

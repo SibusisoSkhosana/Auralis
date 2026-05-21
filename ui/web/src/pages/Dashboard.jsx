@@ -51,16 +51,23 @@ export default function Dashboard() {
       setProject(data)
       setCurrentSessionId(data.sessionId || null)
     } catch (err) {
-      setError(err.message || 'Failed to load active project.')
+      // Log error but don't show 422 on initial load (expected when no project configured)
+      if (err.message && err.message.includes('422')) {
+        console.warn('No active project yet:', err.message)
+      } else {
+        setError(err.message || 'Failed to load active project.')
+      }
     } finally {
       setIsProjectLoading(false)
     }
   }, [])
 
   useEffect(() => {
+    // Only load data after auth context has finished initialization
+    if (!user) return
     loadStats()
     loadProject()
-  }, [loadStats, loadProject])
+  }, [user, loadStats, loadProject])
 
   const uploadActiveProject = useCallback(async (projectFiles) => {
     if (projectFiles.length < 2) return
