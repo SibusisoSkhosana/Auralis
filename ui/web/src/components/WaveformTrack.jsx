@@ -1,5 +1,6 @@
-import React, { useEffect, useRef } from 'react'
+import React, { useContext, useEffect, useRef } from 'react'
 import WaveSurfer from 'wavesurfer.js'
+import { AudioContext } from '../context/AudioContext'
 
 export default function WaveformTrack({
   label,
@@ -10,6 +11,7 @@ export default function WaveformTrack({
 }) {
   const containerRef = useRef(null)
   const waveRef = useRef(null)
+  const audio = useContext(AudioContext)
 
   useEffect(() => {
     if (!containerRef.current || !audioUrl) return undefined
@@ -35,6 +37,16 @@ export default function WaveformTrack({
       waveRef.current = null
     }
   }, [audioUrl, movable])
+
+  // Sync playhead with global audio context
+  useEffect(() => {
+    if (!waveRef.current || !audio?.currentTime) return
+
+    const wave = waveRef.current
+    if (audio.currentUrl === audioUrl) {
+      wave.setCurrentTime(audio.currentTime)
+    }
+  }, [audio?.currentTime, audio?.currentUrl, audioUrl])
 
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-4">

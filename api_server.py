@@ -10,20 +10,35 @@ It handles:
 import os
 import sys
 import json
+from datetime import datetime
 from pathlib import Path
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
+from flask_jwt_extended import JWTManager, create_access_token, get_jwt_identity, jwt_required
 from werkzeug.utils import secure_filename
+from dotenv import load_dotenv
 import traceback
 import librosa
 import numpy as np
 from urllib.parse import quote
 
+# Load environment variables from .env when present
+load_dotenv()
+
 # Add parent directory to path for Auralis imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from models.database import db, get_database_uri
+from models.entities import (
+    User,
+    AudioUpload,
+    ProcessingSession,
+    OutputResult,
+    Feedback,
+)
 from models.mix_generator import MixGenerator, to_json_compatible
 from models.data_collector import log_mix_comparison
+from services.training_data_collector import TrainingDataCollectorService
 from audio.alignment import (
     calculate_alignment,
     load_alignment_offsets,
@@ -38,18 +53,31 @@ from utils.audio_config import get_audio_config, load_config, save_config
 # ============================================================================
 
 app = Flask(__name__)
-CORS(app)
+
+cors_origins = os.getenv('CORS_ORIGINS', '*')
+if cors_origins.strip() == '*':
+    cors_origins = '*'
+else:
+    cors_origins = [origin.strip() for origin in cors_origins.split(',') if origin.strip()]
+
+CORS(app, resources={r"/api/*": {"origins": cors_origins}})
+app.config['SQLALCHEMY_DATABASE_URI'] = get_database_uri()
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY', 'auralis-secret-key')
+
+db.init_app(app)
+jwt = JWTManager(app)
 
 # File upload configuration
-UPLOAD_FOLDER = 'uploads'
+UPLOAD_FOLDER = Path(os.getenv('UPLOAD_FOLDER', 'uploads'))
 ALLOWED_EXTENSIONS = {'wav', 'mp3', 'flac', 'ogg'}
 MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2GB for local stem batches
 
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+app.config['UPLOAD_FOLDER'] = str(UPLOAD_FOLDER)
 app.config['MAX_CONTENT_LENGTH'] = MAX_FILE_SIZE
 
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-os.makedirs('resources', exist_ok=True)
+UPLOAD_FOLDER.mkdir(parents=True, exist_ok=True)
+Path('resources').mkdir(parents=True, exist_ok=True)
 
 # Global mixer instance
 mixer = None
@@ -69,6 +97,16 @@ def init_mixer():
     except Exception as e:
         print(f"Warning: Could not initialize mixer with existing config: {e}")
     return False
+
+with app.app_context():
+    # Create DB tables at startup (Flask 3 removes before_first_request)
+    db.create_all()
+
+def get_current_user():
+    identity = get_jwt_identity()
+    if identity is None:
+        return None
+    return User.query.filter_by(id=identity).first()
 
 # ============================================================================
 # HELPER FUNCTIONS
@@ -196,15 +234,243 @@ def api_index():
             'health': '/api/health',
             'stats': '/api/stats',
             'project': '/api/project',
-            'upload_project': 'POST /api/project/upload',
+            'upload': 'POST /api/upload',
+            'history': '/api/history',
+            'auth_register': 'POST /api/auth/register',
+            'auth_login': 'POST /api/auth/login',
             'source_audio': '/api/source-audio/<filename>',
             'sync_alignment': 'POST /api/alignment/sync',
             'save_alignment': 'POST /api/alignment',
             'generate_mixes': 'POST /api/generate-mixes',
-            'submit_feedback': 'POST /api/submit-feedback',
+            'feedback': 'POST /api/feedback',
             'clear_project': 'POST /api/project/clear'
         }
     })
+
+@app.route('/api/auth/register', methods=['POST'])
+def register():
+    payload = request.get_json() or {}
+    email = (payload.get('email') or '').strip().lower()
+    password = payload.get('password')
+    consent = bool(payload.get('consent_to_training', False))
+
+    if not email or not password:
+        return jsonify({'error': 'Email and password are required.'}), 400
+
+    if User.query.filter_by(email=email).first():
+        return jsonify({'error': 'Email already registered.'}), 400
+
+    user = User(email=email, consent_to_training=consent)
+    user.set_password(password)
+    db.session.add(user)
+    db.session.commit()
+
+    access_token = create_access_token(identity=user.id)
+    return jsonify({
+        'access_token': access_token,
+        'user': {
+            'id': user.id,
+            'email': user.email,
+            'created_at': user.created_at.isoformat(),
+            'consent_to_training': user.consent_to_training,
+        }
+    })
+
+@app.route('/api/auth/login', methods=['POST'])
+def login():
+    payload = request.get_json() or {}
+    email = (payload.get('email') or '').strip().lower()
+    password = payload.get('password')
+
+    if not email or not password:
+        return jsonify({'error': 'Email and password are required.'}), 400
+
+    user = User.query.filter_by(email=email).first()
+    if not user or not user.check_password(password):
+        return jsonify({'error': 'Invalid email or password.'}), 401
+
+    access_token = create_access_token(identity=user.id)
+    return jsonify({
+        'access_token': access_token,
+        'user': {
+            'id': user.id,
+            'email': user.email,
+            'created_at': user.created_at.isoformat(),
+            'consent_to_training': user.consent_to_training,
+        }
+    })
+
+@app.route('/api/history', methods=['GET'])
+@jwt_required()
+def get_history():
+    user = get_current_user()
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    uploads = [
+        {
+            'id': upload.id,
+            'original_name': upload.original_name,
+            'filename': upload.filename,
+            'content_type': upload.content_type,
+            'size': upload.size,
+            'path': upload.path,
+            'status': upload.status,
+            'uploaded_at': upload.uploaded_at.isoformat(),
+            'session_id': upload.session_id,
+        }
+        for upload in AudioUpload.query.filter_by(user_id=user.id).order_by(AudioUpload.uploaded_at.desc()).all()
+    ]
+
+    sessions = []
+    for session in ProcessingSession.query.filter_by(user_id=user.id).order_by(ProcessingSession.started_at.desc()).all():
+        result = session.output_result
+        sessions.append({
+            'id': session.id,
+            'started_at': session.started_at.isoformat(),
+            'completed_at': session.completed_at.isoformat() if session.completed_at else None,
+            'status': session.status,
+            'model_confidence': session.model_confidence,
+            'result': {
+                'id': result.id,
+                'mix_a_path': result.mix_a_path,
+                'mix_b_path': result.mix_b_path,
+                'both_valid': result.both_valid,
+            } if result else None,
+        })
+
+    feedback = [
+        {
+            'id': record.id,
+            'result_id': record.result_id,
+            'choice': record.choice,
+            'metadata': record.meta,
+            'recorded_at': record.recorded_at.isoformat(),
+            'mix_a_path': record.result.mix_a_path if record.result else None,
+            'mix_b_path': record.result.mix_b_path if record.result else None,
+        }
+        for record in Feedback.query.filter_by(user_id=user.id).order_by(Feedback.recorded_at.desc()).all()
+    ]
+
+    return jsonify({
+        'user': {
+            'id': user.id,
+            'email': user.email,
+            'created_at': user.created_at.isoformat(),
+            'consent_to_training': user.consent_to_training,
+        },
+        'uploads': uploads,
+        'sessions': sessions,
+        'feedback': feedback,
+    })
+
+@app.route('/api/upload', methods=['POST'])
+@jwt_required()
+def upload_project():
+    user = get_current_user()
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    try:
+        uploaded_files = request.files.getlist('files')
+        if not uploaded_files:
+            return jsonify({'error': 'No audio files uploaded'}), 400
+
+        session = ProcessingSession(user_id=user.id, status='uploaded', started_at=datetime.utcnow())
+        db.session.add(session)
+        db.session.commit()
+
+        active_config = save_uploaded_project(uploaded_files)
+
+        for uploaded_file in uploaded_files:
+            if not uploaded_file.filename or not allowed_file(uploaded_file.filename):
+                continue
+
+            filename = secure_filename(uploaded_file.filename)
+            if not filename:
+                continue
+
+            file_path = Path('resources') / filename
+            upload_record = AudioUpload(
+                user_id=user.id,
+                session_id=session.id,
+                original_name=uploaded_file.filename,
+                filename=filename,
+                content_type=uploaded_file.mimetype,
+                size=file_path.stat().st_size if file_path.exists() else 0,
+                path=str(file_path),
+                status='saved',
+            )
+            db.session.add(upload_record)
+
+        db.session.commit()
+        return jsonify({**get_project_payload(), 'sessionId': session.id})
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error uploading project: {e}")
+        traceback.print_exc()
+        return jsonify({'error': f'Failed to upload project: {str(e)}'}), 500
+
+@app.route('/api/project/upload', methods=['POST'])
+@jwt_required()
+def upload_project_alias():
+    return upload_project()
+
+@app.route('/api/feedback', methods=['POST'])
+@jwt_required()
+def feedback():
+    user = get_current_user()
+    if not user:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    try:
+        data = request.get_json() or {}
+        choice = (data.get('choice') or '').lower()
+        params_a = data.get('paramsA')
+        params_b = data.get('paramsB')
+        result_id = data.get('resultId')
+        metadata = data.get('metadata') or {}
+
+        if choice not in ['a', 'b', 'tie', 'skip']:
+            return jsonify({'error': f'Invalid choice: {choice}'}), 400
+
+        if not result_id:
+            return jsonify({'error': 'Result ID is required for feedback.'}), 400
+
+        result = OutputResult.query.join(ProcessingSession).filter(
+            OutputResult.id == result_id,
+            ProcessingSession.user_id == user.id,
+        ).first()
+        if not result:
+            return jsonify({'error': 'Result not found or unauthorized.'}), 404
+
+        record = Feedback(
+            user_id=user.id,
+            result_id=result.id,
+            choice=choice,
+            meta=metadata,
+        )
+        db.session.add(record)
+
+        if choice != 'skip' and user.consent_to_training:
+            result.approved_for_training = True
+            db.session.add(result)
+            collector = TrainingDataCollectorService(db.session)
+            collector.mark_sample_for_training(result)
+
+        db.session.commit()
+
+        return jsonify({
+            'success': True,
+            'message': choice == 'skip' and 'Comparison skipped.' or f'Feedback recorded: {choice.upper()} preferred',
+            'recorded': True,
+            'choice': choice,
+        })
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error processing feedback: {e}")
+        traceback.print_exc()
+        return jsonify({'error': f'Failed to submit feedback: {str(e)}'}), 500
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
@@ -218,13 +484,16 @@ def health_check():
 def get_stats():
     """Get training statistics."""
     try:
+        total = Feedback.query.count()
+        valid = Feedback.query.filter(Feedback.choice.in_(['a', 'b', 'tie'])).count()
+        skipped = Feedback.query.filter_by(choice='skip').count()
+        return jsonify({'total': total, 'valid': valid, 'skipped': skipped})
+    except Exception:
         stats = get_training_stats()
         return jsonify(stats)
-    except Exception as e:
-        print(f"Error fetching stats: {e}")
-        return jsonify({'total': 0, 'valid': 0, 'skipped': 0})
 
 @app.route('/api/project', methods=['GET'])
+@jwt_required()
 def get_project():
     """Get active project files and alignment offsets."""
     try:
@@ -233,24 +502,8 @@ def get_project():
         print(f"Error fetching project: {e}")
         return jsonify({'error': 'Failed to fetch project'}), 500
 
-@app.route('/api/project/upload', methods=['POST'])
-def upload_project():
-    """Upload files and make them the active alignment/mixing project."""
-    global mixer
-    try:
-        uploaded_files = request.files.getlist('files')
-        if not uploaded_files:
-            return jsonify({'error': 'No audio files uploaded'}), 400
-
-        active_config = save_uploaded_project(uploaded_files)
-        mixer = MixGenerator(active_config)
-        return jsonify(get_project_payload())
-    except Exception as e:
-        print(f"Error uploading project: {e}")
-        traceback.print_exc()
-        return jsonify({'error': f'Failed to upload project: {str(e)}'}), 500
-
 @app.route('/api/source-audio/<path:filename>', methods=['GET'])
+@jwt_required()
 def serve_source_audio(filename):
     """Serve active project source audio for waveform rendering."""
     try:
@@ -273,6 +526,7 @@ def serve_source_audio(filename):
         return jsonify({'error': 'Failed to serve source audio'}), 500
 
 @app.route('/api/alignment/sync', methods=['POST'])
+@jwt_required()
 def sync_alignment():
     """Calculate suggested alignment offsets for active vocal stems."""
     try:
@@ -319,6 +573,7 @@ def sync_alignment():
         return jsonify({'error': f'Failed to sync alignment: {str(e)}'}), 500
 
 @app.route('/api/alignment', methods=['POST'])
+@jwt_required()
 def save_alignment():
     """Persist user alignment offsets."""
     try:
@@ -350,23 +605,46 @@ def save_alignment():
         return jsonify({'error': f'Failed to save alignment: {str(e)}'}), 500
 
 @app.route('/api/generate-mixes', methods=['POST'])
+@jwt_required()
 def generate_mixes():
     """Generate comparison mixes from uploaded or configured audio stems.
     
     Request:
-        - optional sourceFiles metadata from the React UI
+        - optional sessionId to bind results to a user session
     
     Response:
         - mixA_url: URL to Mix A WAV
         - mixB_url: URL to Mix B WAV
         - paramsA: Parameters used for Mix A
         - paramsB: Parameters used for Mix B
+        - resultId: persisted output result id
+        - sessionId: tied processing session id
     """
     global mixer
     try:
+        user = get_current_user()
+        if not user:
+            return jsonify({'error': 'Unauthorized'}), 401
+
+        payload = request.get_json() or {}
+        session_id = payload.get('sessionId')
+
+        processing_session = None
+        if session_id:
+            processing_session = ProcessingSession.query.filter_by(id=session_id, user_id=user.id).first()
+
+        if processing_session is None:
+            processing_session = (
+                ProcessingSession.query.filter_by(user_id=user.id)
+                .order_by(ProcessingSession.started_at.desc())
+                .first()
+            )
+
+        if processing_session is None:
+            return jsonify({'error': 'No active processing session found for this user.'}), 400
+
         active_config = None
 
-        # Check if mixer is initialized
         if mixer is None:
             active_config = load_config() or get_audio_config()
             if active_config:
@@ -375,28 +653,46 @@ def generate_mixes():
                 return jsonify({
                     'error': 'Mixer not initialized. Upload a project or check audio configuration.'
                 }), 400
-        
-        # Generate mixes
+
         result = mixer.generate_comparison_mixes()
-        
-        # Export mixes
+
         save_audio('resources/mix_a.wav', result['mix_a'], result['sr'])
         save_audio('resources/mix_b.wav', result['mix_b'], result['sr'])
-        
-        # Prepare response
+
+        output_result = OutputResult(
+            session_id=processing_session.id,
+            mix_a_path='resources/mix_a.wav',
+            mix_b_path='resources/mix_b.wav',
+            params_a=result['params_a'],
+            params_b=result['params_b'],
+            validation_a=result.get('validation_a'),
+            validation_b=result.get('validation_b'),
+            both_valid=bool(result.get('both_valid', False)),
+        )
+        db.session.add(output_result)
+
+        processing_session.status = 'generated'
+        processing_session.completed_at = datetime.utcnow()
+        if 'model_confidence' in result:
+            processing_session.model_confidence = float(result['model_confidence'])
+
+        db.session.add(processing_session)
+        db.session.commit()
+
         response = to_json_compatible({
             'mixA_url': '/api/audio/mix_a.wav',
             'mixB_url': '/api/audio/mix_b.wav',
             'paramsA': result['params_a'],
             'paramsB': result['params_b'],
-            'validationA': result['validation_a'],
-            'validationB': result['validation_b'],
-            'bothValid': result['both_valid'],
-            'config': active_config or load_config()
+            'validationA': result.get('validation_a'),
+            'validationB': result.get('validation_b'),
+            'bothValid': result.get('both_valid', False),
+            'resultId': output_result.id,
+            'sessionId': processing_session.id,
+            'config': active_config or load_config(),
         })
-        
+
         return jsonify(response)
-    
     except Exception as e:
         print(f"Error generating mixes: {e}")
         traceback.print_exc()
@@ -405,6 +701,7 @@ def generate_mixes():
         }), 500
 
 @app.route('/api/audio/<filename>', methods=['GET'])
+@jwt_required()
 def serve_audio(filename):
     """Serve generated audio files."""
     try:
@@ -422,6 +719,7 @@ def serve_audio(filename):
         return jsonify({'error': 'Failed to serve audio'}), 500
 
 @app.route('/api/project/clear', methods=['POST'])
+@jwt_required()
 def clear_project():
     """Clear active project audio files and reset the mixer."""
     global mixer
@@ -446,75 +744,9 @@ def clear_project():
         }), 500
 
 @app.route('/api/submit-feedback', methods=['POST'])
+@jwt_required()
 def submit_feedback():
-    """Submit user feedback on mix comparison.
-    
-    Request JSON:
-        - choice: 'a' | 'b' | 'tie' | 'skip'
-        - paramsA: Parameters for Mix A
-        - paramsB: Parameters for Mix B
-    
-    Response:
-        - success: true
-        - message: Confirmation message
-    """
-    try:
-        data = request.get_json()
-        
-        if not data:
-            return jsonify({'error': 'No JSON data provided'}), 400
-        
-        choice = data.get('choice', '').lower()
-        params_a = data.get('paramsA')
-        params_b = data.get('paramsB')
-        
-        # Validate choice
-        if choice not in ['a', 'b', 'tie', 'skip']:
-            return jsonify({'error': f'Invalid choice: {choice}'}), 400
-        
-        if not params_a or not params_b:
-            return jsonify({'error': 'Missing parameters'}), 400
-        
-        # If skip, don't record (as per safety guidelines)
-        if choice == 'skip':
-            return jsonify({
-                'success': True,
-                'message': 'Comparison skipped (not recorded)',
-                'recorded': False
-            })
-        
-        # Get current configuration
-        config = load_config()
-        if not config:
-            return jsonify({'error': 'Audio configuration not found'}), 400
-        
-        # Log the comparison
-        vocals_paths = {
-            Path(vf).stem: f"resources/{vf}"
-            for vf in config['vocals']
-        }
-        
-        log_mix_comparison(
-            vocals_paths_dict=vocals_paths,
-            beat_path=f"resources/{config['beat']}",
-            params_a=params_a,
-            params_b=params_b,
-            preference=choice
-        )
-        
-        return jsonify({
-            'success': True,
-            'message': f'Feedback recorded: Mix {choice.upper()} preferred',
-            'recorded': True,
-            'choice': choice
-        })
-    
-    except Exception as e:
-        print(f"Error submitting feedback: {e}")
-        traceback.print_exc()
-        return jsonify({
-            'error': f'Failed to submit feedback: {str(e)}'
-        }), 500
+    return feedback()
 
 # ============================================================================
 # ERROR HANDLERS
@@ -563,14 +795,17 @@ if __name__ == '__main__':
     else:
         print("[WARNING] Mixer not ready - run python utils/audio_config.py first")
     
-    print("\nStarting Flask server on http://localhost:5000")
-    print("React UI will be available on http://localhost:5173")
+    default_port = int(os.getenv('PORT', 5000))
+    flask_debug = os.getenv('FLASK_DEBUG', '0').lower() in ('1', 'true', 'yes')
+    frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:5173')
+
+    print(f"\nStarting Flask server on http://0.0.0.0:{default_port}")
+    print(f"React UI default URL: {frontend_url}")
     print("\nPress Ctrl+C to stop\n")
     
-    # Run server
     app.run(
-        host='0.0.0.0',
-        port=5000,
-        debug=False,
+        host=os.getenv('HOST', '0.0.0.0'),
+        port=default_port,
+        debug=flask_debug,
         use_reloader=False
     )

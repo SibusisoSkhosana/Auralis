@@ -1,4 +1,5 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useContext, useEffect, useMemo, useRef, useState } from 'react'
+import { AudioContext } from '../context/AudioContext'
 
 const bars = [38, 56, 44, 72, 48, 64, 34, 82, 58, 46, 70, 40, 62, 76, 50, 68, 42, 54, 80, 36]
 
@@ -16,62 +17,18 @@ function formatValue(value) {
 }
 
 export default function AudioPlayer({ label, audioUrl, isPlaying, onPlayChange, params = {}, validation = {} }) {
-  const audioRef = useRef(null)
-  const [duration, setDuration] = useState(0)
-  const [currentTime, setCurrentTime] = useState(0)
+  const audio = useContext(AudioContext)
   const [loadError, setLoadError] = useState(false)
 
-  const progress = duration > 0 ? Math.min(currentTime / duration, 1) : 0
+  // Update play state if URL changes
+  useEffect(() => {
+    if (isPlaying && audio?.currentUrl !== audioUrl) {
+      setLoadError(false)
+    }
+  }, [audioUrl, isPlaying, audio?.currentUrl])
+
+  const progress = audio?.duration > 0 ? Math.min(audio?.currentTime / audio?.duration, 1) : 0
   const visibleParams = useMemo(() => Object.entries(params).slice(0, 6), [params])
-
-  useEffect(() => {
-    const audio = audioRef.current
-    if (!audio) return
-
-    const updateTime = () => setCurrentTime(audio.currentTime)
-    const updateDuration = () => setDuration(Number.isFinite(audio.duration) ? audio.duration : 0)
-    const handleEnded = () => onPlayChange(false)
-    const handleError = () => setLoadError(true)
-    const handleCanPlay = () => setLoadError(false)
-
-    audio.addEventListener('timeupdate', updateTime)
-    audio.addEventListener('loadedmetadata', updateDuration)
-    audio.addEventListener('ended', handleEnded)
-    audio.addEventListener('error', handleError)
-    audio.addEventListener('canplay', handleCanPlay)
-
-    return () => {
-      audio.removeEventListener('timeupdate', updateTime)
-      audio.removeEventListener('loadedmetadata', updateDuration)
-      audio.removeEventListener('ended', handleEnded)
-      audio.removeEventListener('error', handleError)
-      audio.removeEventListener('canplay', handleCanPlay)
-    }
-  }, [onPlayChange])
-
-  useEffect(() => {
-    const audio = audioRef.current
-    if (!audio) return
-
-    if (isPlaying) {
-      audio.play().catch(() => onPlayChange(false))
-    } else {
-      audio.pause()
-    }
-  }, [isPlaying, onPlayChange])
-
-  useEffect(() => {
-    setCurrentTime(0)
-    setDuration(0)
-    setLoadError(false)
-  }, [audioUrl])
-
-  const seek = (event) => {
-    if (!duration || !audioRef.current) return
-    const rect = event.currentTarget.getBoundingClientRect()
-    const nextProgress = Math.max(0, Math.min((event.clientX - rect.left) / rect.width, 1))
-    audioRef.current.currentTime = nextProgress * duration
-  }
 
   return (
     <article className="flex min-h-0 flex-col rounded-lg border border-zinc-800 bg-zinc-950">
@@ -80,18 +37,18 @@ export default function AudioPlayer({ label, audioUrl, isPlaying, onPlayChange, 
           <h3 className="text-sm font-semibold uppercase tracking-[0.18em] text-zinc-100">{label}</h3>
           <p className="mt-1 text-xs text-zinc-500">{validation?.is_good ? 'Validated for training' : 'Comparison render'}</p>
         </div>
-        <span className={`rounded-full border px-2.5 py-1 text-xs ${
-          isPlaying
-            ? 'border-cyan-400/30 bg-cyan-400/10 text-cyan-100'
-            : 'border-zinc-700 bg-zinc-900 text-zinc-500'
-        }`}>
+        <span
+          className={`rounded-full border px-2.5 py-1 text-xs ${
+            isPlaying
+              ? 'border-cyan-400/30 bg-cyan-400/10 text-cyan-100'
+              : 'border-zinc-700 bg-zinc-900 text-zinc-500'
+          }`}
+        >
           {isPlaying ? 'Playing' : 'Idle'}
         </span>
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col p-4">
-        <audio ref={audioRef} src={audioUrl} preload="metadata" />
-
         <div
           className="mb-5 grid h-28 items-end gap-1 rounded-md border border-zinc-800 bg-[#090b0d] px-3 py-3"
           style={{ gridTemplateColumns: `repeat(${bars.length}, minmax(0, 1fr))` }}
@@ -122,14 +79,19 @@ export default function AudioPlayer({ label, audioUrl, isPlaying, onPlayChange, 
             <button
               type="button"
               className="block h-2 w-full rounded-full bg-zinc-800"
-              onClick={seek}
+              onClick={(event) => {
+                if (!audio?.duration) return
+                const rect = event.currentTarget.getBoundingClientRect()
+                const nextProgress = Math.max(0, Math.min((event.clientX - rect.left) / rect.width, 1))
+                audio.seek(nextProgress * audio.duration)
+              }}
               aria-label={`Seek ${label}`}
             >
               <span className="block h-full rounded-full bg-cyan-300" style={{ width: `${progress * 100}%` }} />
             </button>
             <div className="mt-2 flex justify-between text-xs tabular-nums text-zinc-500">
-              <span>{formatTime(currentTime)}</span>
-              <span>{formatTime(duration)}</span>
+              <span>{formatTime(audio?.currentTime)}</span>
+              <span>{formatTime(audio?.duration)}</span>
             </div>
           </div>
         </div>

@@ -17,4 +17,9 @@ venv/
 # React UI
 ui/web/node_modules/
 ui/web/dist/
+ui/web/.env
 ui/web/*.log
+
+# Runtime / deployment artifacts
+*.db
+uploads/

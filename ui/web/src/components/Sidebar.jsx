@@ -18,6 +18,7 @@ export default function Sidebar({
   canGenerate,
   loading,
   stats,
+  children,
 }) {
   const inputRef = useRef(null)
   const [isDragging, setIsDragging] = useState(false)
@@ -139,6 +140,8 @@ export default function Sidebar({
           <Metric label="Skipped" value={stats.skipped} />
         </div>
       </div>
+
+      {children}
     </aside>
   )
 }
