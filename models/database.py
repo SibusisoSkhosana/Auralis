@@ -10,11 +10,9 @@ db = SQLAlchemy()
 
 def get_database_uri():
     env_url = os.getenv('DATABASE_URL')
-    if env_url:
-        return env_url
-
-    base_dir = Path(__file__).resolve().parent.parent
-    return f"sqlite:///{base_dir / 'auralis.db'}"
+    if not env_url:
+        raise ValueError("DATABASE_URL is not set")
+    return env_url
 
 
 @event.listens_for(Engine, 'connect')

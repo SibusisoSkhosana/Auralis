@@ -228,8 +228,8 @@ def api_index():
     """Friendly index for users who open the API server in a browser."""
     return jsonify({
         'service': 'Auralis Training API',
-        'message': 'This is the backend API. Open the React UI at http://127.0.0.1:5173/',
-        'ui': 'http://127.0.0.1:5173/',
+        'message': 'This is the backend API. Open the React UI at https://auralis-kappa.vercel.app',
+        'ui': 'https://auralis-kappa.vercel.app',
         'endpoints': {
             'health': '/api/health',
             'stats': '/api/stats',
@@ -801,7 +801,7 @@ if __name__ == '__main__':
     
     default_port = int(os.getenv('PORT', 5000))
     flask_debug = os.getenv('FLASK_DEBUG', '0').lower() in ('1', 'true', 'yes')
-    frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:5173')
+    frontend_url = os.getenv('FRONTEND_URL', 'https://auralis-kappa.vercel.app')
 
     print(f"\nStarting Flask server on http://0.0.0.0:{default_port}")
     print(f"React UI default URL: {frontend_url}")
