@@ -58,7 +58,21 @@ app = Flask(__name__)
 
 # Temporary: allow any origin to avoid CORS interruptions while debugging production
 # WARNING: Revert to strict origins after stabilizing (see RENDER_SETUP.md)
-CORS(app, resources={r"/*": {"origins": "*"}})
+CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
+
+# Ensure SSL for PostgreSQL connections when possible
+try:
+    db_uri = app.config.get('SQLALCHEMY_DATABASE_URI', '') or ''
+    if 'postgres' in db_uri and 'sslmode' not in db_uri.lower():
+        # add connect_args so SQLAlchemy/psycopg2 uses TLS
+        engine_opts = app.config.setdefault('SQLALCHEMY_ENGINE_OPTIONS', {})
+        connect_args = engine_opts.get('connect_args', {})
+        connect_args.setdefault('sslmode', 'require')
+        engine_opts['connect_args'] = connect_args
+        app.config['SQLALCHEMY_ENGINE_OPTIONS'] = engine_opts
+        print('[DB] Applied connect_args sslmode=require to SQLALCHEMY_ENGINE_OPTIONS', flush=True)
+except Exception:
+    pass
 
 cors_origins = os.getenv('CORS_ORIGINS', '*')
 if cors_origins.strip() == '*':
@@ -848,6 +862,20 @@ def before_request():
 
     if mixer is None:
         init_mixer()
+
+
+@app.route('/api/debug/db', methods=['GET'])
+def debug_db():
+    """Temporary endpoint to verify DB connectivity."""
+    try:
+        # simple lightweight query
+        with db.engine.connect() as conn:
+            res = conn.execute("SELECT 1")
+            one = res.scalar()
+        return jsonify({'ok': True, 'result': one})
+    except Exception as e:
+        print(f"[DB DEBUG] Connectivity failed: {e}", flush=True)
+        return jsonify({'ok': False, 'error': str(e)}), 500
     # Trigger a throttled cleanup during normal request traffic (no-op if recently run)
     try:
         storage_cleanup.maybe_cleanup_on_request()
