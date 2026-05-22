@@ -60,3 +60,16 @@ This repository is ready for production deployment with the backend hosted on Re
   - `.env`
   - `uploads/`
   - `ui/web/.env`
+
+## Ephemeral Storage Behavior
+
+Render provides ephemeral filesystem storage that may be cleared or is not durable across deploys.
+
+- **Automatic expiration:** Uploaded files and generated mixes placed in `uploads/` and `resources/` are automatically cleaned up after a configurable retention window (default 24 hours).
+- **Configuration:** Control behavior with environment variables in your Render service or `.env`:
+   - `FILE_RETENTION_HOURS` — number of hours to retain files (default `24`).
+   - `ENABLE_STORAGE_CLEANUP` — set to `true` or `false` to enable/disable cleanup (default `true`).
+- **Operational notes:** Users should download any mixes they want to keep; the app does not provide durable long-term storage for audio artifacts in the MVP.
+- **Future persistence:** Approved training samples or long-term assets can be migrated to S3 or another object store in a future release.
+
+See `services/storage_cleanup.py` for implementation details and the app's startup behavior.

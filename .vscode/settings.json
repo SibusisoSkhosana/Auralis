@@ -1,3 +1,9 @@
 {
-    "python-envs.defaultEnvManager": "ms-python.python:system"
+    "python-envs.defaultEnvManager": "ms-python.python:system",
+    "chat.tools.terminal.autoApprove": {
+        "/^python -m py_compile c:\\\\Users\\\\sbasi\\\\OneDrive\\\\Desktop\\\\WebProjects\\\\Auralis\\\\services\\\\storage_cleanup\\.py c:\\\\Users\\\\sbasi\\\\OneDrive\\\\Desktop\\\\WebProjects\\\\Auralis\\\\api_server\\.py$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
 }

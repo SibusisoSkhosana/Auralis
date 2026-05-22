@@ -21,6 +21,7 @@ import traceback
 import librosa
 import numpy as np
 from urllib.parse import quote
+from services import storage_cleanup
 
 # Load environment variables from .env when present
 load_dotenv()
@@ -101,6 +102,11 @@ def init_mixer():
 with app.app_context():
     # Create DB tables at startup (Flask 3 removes before_first_request)
     db.create_all()
+    # Attempt a non-fatal cleanup at startup to remove stale ephemeral files.
+    try:
+        storage_cleanup.cleanup_old_files()
+    except Exception:
+        print('[CLEANUP] Startup cleanup failed, continuing startup', flush=True)
 
 def get_current_user():
     identity = get_jwt_identity()
@@ -787,6 +793,12 @@ def before_request():
     global mixer
     if mixer is None:
         init_mixer()
+    # Trigger a throttled cleanup during normal request traffic (no-op if recently run)
+    try:
+        storage_cleanup.maybe_cleanup_on_request()
+    except Exception:
+        # Never let cleanup failures impact request handling
+        pass
 
 if __name__ == '__main__':
     print("=" * 60)
