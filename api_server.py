@@ -12,6 +12,7 @@ import sys
 import json
 from datetime import datetime
 from pathlib import Path
+import logging
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager, create_access_token, get_jwt_identity, jwt_required, verify_jwt_in_request
@@ -55,19 +56,42 @@ from utils.audio_config import get_audio_config, load_config, save_config
 
 app = Flask(__name__)
 
+# Temporary: allow any origin to avoid CORS interruptions while debugging production
+# WARNING: Revert to strict origins after stabilizing (see RENDER_SETUP.md)
+CORS(app, resources={r"/*": {"origins": "*"}})
+
 cors_origins = os.getenv('CORS_ORIGINS', '*')
 if cors_origins.strip() == '*':
     cors_origins = '*'
 else:
     cors_origins = [origin.strip() for origin in cors_origins.split(',') if origin.strip()]
 
-CORS(app, resources={r"/api/*": {"origins": cors_origins}})
+# Database and JWT configuration
 app.config['SQLALCHEMY_DATABASE_URI'] = get_database_uri()
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+# Engine options to keep RDS connections healthy
+app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+    "pool_pre_ping": True,
+    "pool_recycle": 280,
+    "pool_timeout": 30,
+}
+
 app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY', 'auralis-secret-key')
+
+# Enable SQLAlchemy engine logging to diagnose DB connection issues
+logging.basicConfig(level=logging.INFO)
+logging.getLogger('sqlalchemy.engine').setLevel(logging.INFO)
 
 db.init_app(app)
 jwt = JWTManager(app)
+
+# Warn if DATABASE_URL is missing sslmode (helps RDS TLS connections)
+try:
+    db_uri = app.config.get('SQLALCHEMY_DATABASE_URI', '')
+    if db_uri and 'sslmode' not in db_uri.lower():
+        print('[DB] Warning: DATABASE_URL may be missing sslmode=require', flush=True)
+except Exception:
+    pass
 
 @jwt.unauthorized_loader
 def custom_unauthorized_response(err):
@@ -806,6 +830,12 @@ def internal_error(e):
 def before_request():
     """Initialize before first request."""
     global mixer
+    # Debug request path for Render logs
+    try:
+        print(f"[REQUEST] {request.method} {request.path}", flush=True)
+    except Exception:
+        pass
+
     auth_header = request.headers.get('Authorization')
     if request.path.startswith('/api/'):
         print(f"[AUTH HEADER] {auth_header}", flush=True)

@@ -17,6 +17,7 @@ def get_database_uri():
 
 @event.listens_for(Engine, 'connect')
 def _set_sqlite_pragma(dbapi_connection, connection_record):
+    # When using SQLite, ensure foreign key constraints are enabled.
     if dbapi_connection.__class__.__module__.startswith('sqlite3'):
         cursor = dbapi_connection.cursor()
         cursor.execute('PRAGMA foreign_keys=ON')
