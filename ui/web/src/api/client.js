@@ -10,10 +10,21 @@ const client = axios.create({
   timeout: 120000,
 })
 
+function sanitizeToken(token) {
+  if (!token || typeof token !== 'string') return null
+  let t = token.trim()
+  // strip surrounding single or double quotes if present
+  if ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'"))) {
+    t = t.slice(1, -1)
+  }
+  return t
+}
+
 export function setAuthToken(token) {
-  if (token) {
-    client.defaults.headers.common.Authorization = `Bearer ${token}`
-    localStorage.setItem(AUTH_STORAGE, token)
+  const sanitized = sanitizeToken(token)
+  if (sanitized) {
+    client.defaults.headers.common.Authorization = `Bearer ${sanitized}`
+    localStorage.setItem(AUTH_STORAGE, sanitized)
   } else {
     delete client.defaults.headers.common.Authorization
     localStorage.removeItem(AUTH_STORAGE)
