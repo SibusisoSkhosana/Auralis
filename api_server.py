@@ -69,6 +69,21 @@ app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY', 'auralis-secret-key')
 db.init_app(app)
 jwt = JWTManager(app)
 
+@jwt.unauthorized_loader
+def custom_unauthorized_response(err):
+    print(f"[JWT] Unauthorized request: {err}", flush=True)
+    return jsonify({'error': 'Authorization header missing or invalid.'}), 401
+
+@jwt.invalid_token_loader
+def custom_invalid_token_response(err):
+    print(f"[JWT] Invalid token: {err}", flush=True)
+    return jsonify({'error': 'Invalid authorization token.'}), 401
+
+@jwt.expired_token_loader
+def custom_expired_token_response(jwt_header, jwt_payload):
+    print('[JWT] Expired token', flush=True)
+    return jsonify({'error': 'Authorization token expired.'}), 401
+
 # File upload configuration
 UPLOAD_FOLDER = Path(os.getenv('UPLOAD_FOLDER', 'uploads'))
 ALLOWED_EXTENSIONS = {'wav', 'mp3', 'flac', 'ogg'}

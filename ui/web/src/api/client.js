@@ -23,6 +23,18 @@ export function setAuthToken(token) {
 const storedToken = localStorage.getItem(AUTH_STORAGE)
 if (storedToken) {
   setAuthToken(storedToken)
+} else {
+  const savedAuth = localStorage.getItem('auralis_auth')
+  if (savedAuth) {
+    try {
+      const parsed = JSON.parse(savedAuth)
+      if (parsed?.token) {
+        setAuthToken(parsed.token)
+      }
+    } catch {
+      // ignore malformed storage
+    }
+  }
 }
 
 function messageFromError(error, fallback) {

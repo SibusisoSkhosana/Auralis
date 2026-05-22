@@ -51,12 +51,7 @@ export default function Dashboard() {
       setProject(data)
       setCurrentSessionId(data.sessionId || null)
     } catch (err) {
-      // Log error but don't show 422 on initial load (expected when no project configured)
-      if (err.message && err.message.includes('422')) {
-        console.warn('No active project yet:', err.message)
-      } else {
-        setError(err.message || 'Failed to load active project.')
-      }
+      setError(err.message || 'Failed to load active project.')
     } finally {
       setIsProjectLoading(false)
     }
