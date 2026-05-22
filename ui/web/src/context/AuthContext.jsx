@@ -1,8 +1,8 @@
 import React, { createContext, useContext, useEffect, useMemo, useState } from 'react'
-import { apiClient, setAuthToken } from '../api/client'
+import { apiClient, setAuthToken, AUTH_STORAGE, AUTH_DATA_STORAGE } from '../api/client'
 
 const AuthContext = createContext(null)
-const STORAGE_KEY = 'auralis_auth'
+const STORAGE_KEY = AUTH_DATA_STORAGE
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null)
@@ -19,9 +19,11 @@ export function AuthProvider({ children }) {
           setToken(parsed.token)
           setUser(parsed.user)
           setAuthToken(parsed.token)
+          localStorage.setItem(AUTH_STORAGE, parsed.token)
         }
       } catch {
         localStorage.removeItem(STORAGE_KEY)
+        localStorage.removeItem(AUTH_STORAGE)
       }
     }
     setLoading(false)
@@ -32,6 +34,7 @@ export function AuthProvider({ children }) {
     setUser(authUser)
     setAuthToken(authToken)
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ user: authUser, token: authToken }))
+    localStorage.setItem(AUTH_STORAGE, authToken)
   }
 
   const login = async (email, password) => {
@@ -52,6 +55,7 @@ export function AuthProvider({ children }) {
     setError(null)
     setAuthToken(null)
     localStorage.removeItem(STORAGE_KEY)
+    localStorage.removeItem(AUTH_STORAGE)
   }
 
   const value = useMemo(

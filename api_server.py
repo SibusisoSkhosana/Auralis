@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
-from flask_jwt_extended import JWTManager, create_access_token, get_jwt_identity, jwt_required
+from flask_jwt_extended import JWTManager, create_access_token, get_jwt_identity, jwt_required, verify_jwt_in_request
 from werkzeug.utils import secure_filename
 from dotenv import load_dotenv
 import traceback
@@ -806,6 +806,16 @@ def internal_error(e):
 def before_request():
     """Initialize before first request."""
     global mixer
+    auth_header = request.headers.get('Authorization')
+    if request.path.startswith('/api/'):
+        print(f"[AUTH HEADER] {auth_header}", flush=True)
+        if auth_header:
+            try:
+                verify_jwt_in_request(optional=True)
+                print(f"[JWT IDENTITY] {get_jwt_identity()}", flush=True)
+            except Exception as exc:
+                print(f"[JWT IDENTITY] invalid token: {exc}", flush=True)
+
     if mixer is None:
         init_mixer()
     # Trigger a throttled cleanup during normal request traffic (no-op if recently run)

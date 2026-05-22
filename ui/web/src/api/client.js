@@ -3,7 +3,8 @@ import axios from 'axios'
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || (import.meta.env.DEV ? '/api' : 'http://localhost:5000/api')
 const apiUrl = API_BASE_URL.startsWith('/') ? `${window.location.origin}${API_BASE_URL}` : API_BASE_URL
 const apiOrigin = new URL(apiUrl, window.location.origin).origin
-const AUTH_STORAGE = 'auralis_auth_token'
+export const AUTH_STORAGE = 'auralis_auth_token'
+export const AUTH_DATA_STORAGE = 'auralis_auth'
 
 const client = axios.create({
   baseURL: API_BASE_URL,
@@ -13,12 +14,39 @@ const client = axios.create({
 function sanitizeToken(token) {
   if (!token || typeof token !== 'string') return null
   let t = token.trim()
-  // strip surrounding single or double quotes if present
   if ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'"))) {
     t = t.slice(1, -1)
   }
   return t
 }
+
+function resolveStoredToken() {
+  const storedToken = sanitizeToken(localStorage.getItem(AUTH_STORAGE))
+  if (storedToken) return storedToken
+
+  const savedAuth = localStorage.getItem(AUTH_DATA_STORAGE)
+  if (!savedAuth) return null
+
+  try {
+    const parsed = JSON.parse(savedAuth)
+    if (parsed?.token) {
+      return sanitizeToken(parsed.token)
+    }
+  } catch {
+    localStorage.removeItem(AUTH_DATA_STORAGE)
+  }
+
+  return null
+}
+
+client.interceptors.request.use((config) => {
+  const token = resolveStoredToken()
+  if (token) {
+    config.headers = config.headers || {}
+    config.headers.Authorization = `Bearer ${token}`
+  }
+  return config
+})
 
 export function setAuthToken(token) {
   const sanitized = sanitizeToken(token)
